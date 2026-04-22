@@ -41,26 +41,43 @@ class MultiAgentExecutor:
         self._cached_prompt_hash = None
 
     def _get_architecture_signal(self, user_prompt: str) -> str:
-        """获取 CustomModel 真实数值特征信号（带缓存）"""
+        """获取 CustomModel 语义特征信号（带缓存）"""
         prompt_hash = hash(user_prompt)
         if self._cached_signal is not None and self._cached_prompt_hash == prompt_hash:
             return self._cached_signal
 
-        # 尝试初始化 processor
+        # 尝试使用全局 processor（如果已初始化）
         if self._processor is None:
             try:
-                from .architecture_processor import ArchitectureProcessor
-                self._processor = ArchitectureProcessor(device="cpu")
+                # 首先尝试从 main 模块获取全局 processor
+                import sys
+                if 'backend.main' in sys.modules:
+                    main_module = sys.modules['backend.main']
+                    if hasattr(main_module, 'architecture_processor') and main_module.architecture_processor is not None:
+                        self._processor = main_module.architecture_processor
+                        logger.info("Using global ArchitectureProcessor from main module")
+                    else:
+                        # 回退：创建新的 processor
+                        from .architecture_processor import ArchitectureProcessor
+                        self._processor = ArchitectureProcessor(device="cpu")
+                else:
+                    # main 模块未加载，创建新的 processor
+                    from .architecture_processor import ArchitectureProcessor
+                    self._processor = ArchitectureProcessor(device="cpu")
             except Exception as e:
                 logger.warning(f"ArchitectureProcessor unavailable: {e}")
-                self._processor = False
+                self._processor = NotImplemented
 
-        if self._processor and self._processor != False:
+        if self._processor is not NotImplemented and self._processor is not None:
             try:
                 result = self._processor.process(user_prompt)
                 signal = result.get("architecture_signal", "")
+                encoder_status = result.get("encoder_status", "unknown")
+                
                 self._cached_signal = signal
                 self._cached_prompt_hash = prompt_hash
+                
+                logger.info(f"Semantic signal generated (encoder: {encoder_status}, length: {len(signal)})")
                 return signal
             except Exception as e:
                 logger.warning(f"ArchitectureProcessor process failed: {e}")

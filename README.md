@@ -21,11 +21,6 @@
 │   │   ├── hybrid_attention.py   # 混合注意力
 │   │   ├── dynamic_memory.py     # 动态记忆
 │   │   └── gated_ffn.py          # 门控前馈
-│   ├── code_optimization/    # 代码优化模块
-│   │   ├── code_analyzer.py
-│   │   ├── code_enhancer.py
-│   │   ├── frontend_designer.py
-│   │   └── multi_api_manager.py
 │   ├── main.py              # FastAPI 服务
 │   ├── architecture_processor.py  # 架构处理器（真实数值计算）
 │   ├── architecture_injector.py   # 架构注入器

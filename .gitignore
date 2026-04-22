@@ -43,6 +43,9 @@ ENV/
 *.log
 debug.log
 
+# TRAE
+.trae/
+
 # Database
 *.db
 *.sqlite
@@ -73,3 +76,7 @@ yarn-error.log*
 # Build outputs
 frontend/dist/
 frontend/build/
+
+# Kilo
+.kilo/
+.kilocode/

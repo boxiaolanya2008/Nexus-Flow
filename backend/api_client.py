@@ -3,7 +3,7 @@ import aiohttp
 import asyncio
 import os
 from dotenv import load_dotenv
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import time
 import json
 import logging
