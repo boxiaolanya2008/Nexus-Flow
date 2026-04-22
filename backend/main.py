@@ -135,24 +135,8 @@ async def lifespan(app: FastAPI):
     try:
         from .architecture_processor import ArchitectureProcessor
 
-        semantic_encoder_path = os.path.join(
-            os.path.dirname(__file__),
-            "architecture",
-            "semantic_encoder.pt"
-        )
-
-        if os.path.exists(semantic_encoder_path):
-            state.architecture_processor = ArchitectureProcessor(
-                device="cpu",
-                semantic_encoder_path=semantic_encoder_path
-            )
-            if state.architecture_processor.using_trained_encoder:
-                print("  自定义架构已加载（语义编码器已训练）")
-            else:
-                print("  自定义架构已加载（语义编码器未训练）")
-        else:
-            print("  语义编码器模型文件不存在，使用未训练版本")
-            state.architecture_processor = ArchitectureProcessor(device="cpu")
+        state.architecture_processor = ArchitectureProcessor(device="cpu")
+        print("  自定义架构已加载")
     except Exception as e:
         print(f"  自定义架构初始化失败: {e}")
         logger.error(f"Failed to initialize custom architecture: {e}")
@@ -258,11 +242,9 @@ async def get_architecture_status():
     if state.architecture_processor is not None:
         try:
             status = state.architecture_processor.get_architecture_status()
-            encoder_status = status.get("semantic_encoder", {})
             result["custom_architecture"] = {
                 "loaded": True,
                 "status": status,
-                "semantic_encoder_trained": encoder_status.get("status") == "trained"
             }
         except Exception as e:
             result["custom_architecture"] = {"loaded": False, "error": str(e)}
@@ -430,72 +412,6 @@ def _make_chunk(completion_id, created, model, content, finish_reason, delta=Non
         "choices": [{"index": 0, "delta": d, "finish_reason": finish_reason}]
     }
 
-
-
-# 管理端点
-
-
-@app.post("/admin/train-semantic-encoder")
-async def train_semantic_encoder():
-    import threading
-    import subprocess
-
-    def run_training():
-        try:
-            script_path = os.path.join(
-                os.path.dirname(__file__),
-                "architecture",
-                "train_semantic_encoder.py"
-            )
-            result = subprocess.run(
-                [sys.executable, script_path],
-                capture_output=True,
-                text=True,
-                timeout=3600
-            )
-            if result.returncode == 0:
-                logger.info("Semantic encoder training completed successfully")
-                try:
-                    from .architecture_processor import ArchitectureProcessor
-                    encoder_path = os.path.join(os.path.dirname(__file__), "architecture", "semantic_encoder.pt")
-                    if os.path.exists(encoder_path):
-                        state.architecture_processor = ArchitectureProcessor(
-                            device="cpu", semantic_encoder_path=encoder_path
-                        )
-                        logger.info("Semantic encoder reloaded after training")
-                except Exception as e:
-                    logger.error(f"Failed to reload semantic encoder: {e}")
-            else:
-                logger.error(f"Training failed: {result.stderr}")
-        except Exception as e:
-            logger.error(f"Training process error: {e}")
-
-    thread = threading.Thread(target=run_training, daemon=True)
-    thread.start()
-    return {
-        "status": "training_started",
-        "message": "语义编码器训练已在后台启动，请查看日志了解进度"
-    }
-
-
-@app.get("/admin/semantic-encoder-status")
-async def get_semantic_encoder_status():
-    if state.architecture_processor is None:
-        return {"status": "not_initialized", "trained": False}
-
-    try:
-        status = state.architecture_processor.get_architecture_status()
-        encoder_status = status.get("semantic_encoder", {})
-        return {
-            "status": "initialized",
-            "trained": encoder_status.get("status") == "trained",
-            "semantic_dim": encoder_status.get("semantic_dim", 0),
-            "dimensions": encoder_status.get("dimensions", [])[:10],
-            "total_params": status.get("total_parameters", 0),
-            "device": status.get("device", "unknown")
-        }
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-# 架构处理器：CustomModel 的真实数值计算 + 语义编码
-# hidden states 经过 SemanticEncoder 映射到可解释的语义空间后注入 API 请求
+# CustomModel 架构处理器
+# forward 传播后从 hidden states 提取统计特征，编码为结构化信号注入 LLM 请求
 
 import torch
 import torch.nn as nn
@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class ArchitectureProcessor:
-    # 工作流：tokenize -> CustomModel forward -> SemanticEncoder -> 结构化信号 -> 注入 LLM 提示词
-    # 这样外部 LLM 收到的是经过数值化预处理的输入，而非原始文本
+    # tokenize -> CustomModel forward -> hidden states 统计分析 -> 结构化信号
 
     def __init__(
         self,
@@ -25,13 +24,13 @@ class ArchitectureProcessor:
         window_size: int = 64,
         memory_size: int = 128,
         device: str = "cpu",
-        semantic_encoder_path: str = None
+        semantic_encoder_path: str = None  # 保留参数签名兼容，不再使用
     ):
         from .architecture import CustomModel
-        from .architecture.semantic_encoder import SemanticEncoder, SemanticCodeAnalyzer
 
         self.tokenizer = SimpleTokenizer(vocab_size=50000)
         self.device = torch.device(device)
+        self.d_model = d_model
         self.model = CustomModel(
             vocab_size=50000,
             d_model=d_model,
@@ -44,41 +43,12 @@ class ArchitectureProcessor:
         ).to(self.device)
         self.model.eval()
 
-        self.semantic_encoder = SemanticEncoder(
-            d_model=d_model,
-            semantic_dim=64
-        ).to(self.device)
-
-        if semantic_encoder_path is None:
-            semantic_encoder_path = os.path.join(
-                os.path.dirname(__file__),
-                "architecture",
-                "semantic_encoder.pt"
-            )
-
-        if os.path.exists(semantic_encoder_path):
-            try:
-                checkpoint = torch.load(semantic_encoder_path, map_location=self.device)
-                self.semantic_encoder.load_state_dict(checkpoint["encoder_state_dict"])
-                self.semantic_encoder.eval()
-                logger.info(f"SemanticEncoder loaded from {semantic_encoder_path}")
-                self.using_trained_encoder = True
-            except Exception as e:
-                logger.warning(f"Failed to load SemanticEncoder: {e}")
-                self.using_trained_encoder = False
-        else:
-            logger.warning(f"SemanticEncoder checkpoint not found at {semantic_encoder_path}")
-            logger.warning("Using untrained SemanticEncoder - semantic signals will be random")
-            self.using_trained_encoder = False
-
-        self.semantic_analyzer = SemanticCodeAnalyzer(self.semantic_encoder)
         self.extract_layers = [0, n_layers // 2, n_layers - 1]
 
         logger.info(
             f"ArchitectureProcessor initialized: "
             f"{sum(p.numel() for p in self.model.parameters()):,} params, "
-            f"device={device}, "
-            f"semantic_encoder={'trained' if self.using_trained_encoder else 'untrained'}"
+            f"device={device}"
         )
 
     def process(self, text: str) -> Dict[str, Any]:
@@ -92,64 +62,112 @@ class ArchitectureProcessor:
             x = self.model.embedding_norm(token_emb + pos_emb)
             x = self.model.embedding_dropout(x)
 
+            # 收集中间层 hidden states
+            layer_outputs = []
             for block in self.model.blocks:
                 x = block(x)
+                layer_outputs.append(x)
 
             final_hidden = self.model.final_norm(x)
 
-        semantic_vector = self.semantic_encoder(final_hidden)
-        semantic_analysis = self.semantic_analyzer.analyze(final_hidden, text)
-        encoded_signal = self._encode_semantic_to_signal(semantic_analysis, text)
+        # 直接从 hidden states 提取统计特征，不依赖语义编码器
+        feature_analysis = self._extract_features(final_hidden, layer_outputs, text)
+        encoded_signal = self._encode_features_to_signal(feature_analysis, text)
 
         return {
             "architecture_signal": encoded_signal,
-            "semantic_vector": semantic_vector.cpu().numpy().tolist(),
-            "semantic_analysis": semantic_analysis,
+            "feature_analysis": feature_analysis,
             "final_hidden": final_hidden.cpu().numpy(),
             "total_params": sum(p.numel() for p in self.model.parameters()),
-            "encoder_status": "trained" if self.using_trained_encoder else "untrained"
+            "encoder_status": "direct_extraction"
         }
 
-    def _encode_semantic_to_signal(
+    def _extract_features(
         self,
-        semantic_analysis: Dict,
+        final_hidden: torch.Tensor,
+        layer_outputs: List[torch.Tensor],
+        text: str
+    ) -> Dict[str, Any]:
+        # 从 hidden states 提取多维度统计特征
+        # 不依赖外部编码器，直接用张量运算
+
+        # 全局统计
+        hidden_stats = {
+            "mean": final_hidden.mean().item(),
+            "std": final_hidden.std().item(),
+            "min": final_hidden.min().item(),
+            "max": final_hidden.max().item(),
+            "norm_mean": final_hidden.norm(dim=-1).mean().item(),
+            "norm_std": final_hidden.norm(dim=-1).std().item(),
+        }
+
+        # 逐层特征（首、中、尾三层）
+        layer_features = {}
+        for layer_idx in self.extract_layers:
+            h = layer_outputs[layer_idx]
+            layer_features[f"layer_{layer_idx}"] = {
+                "mean": h.mean().item(),
+                "std": h.std().item(),
+                "activation_sparsity": (h.abs() < 0.1).float().mean().item(),
+                "norm_mean": h.norm(dim=-1).mean().item(),
+            }
+
+        # token 级别的激活分布
+        token_norms = final_hidden.norm(dim=-1).squeeze(0)  # (seq_len,)
+        top_active_tokens = torch.topk(token_norms, min(5, token_norms.shape[0]))
+
+        # 层间变化率（捕捉信息流动）
+        layer_deltas = {}
+        for i in range(len(layer_outputs) - 1):
+            delta = (layer_outputs[i + 1] - layer_outputs[i]).norm().item()
+            layer_deltas[f"layer_{i}_to_{i+1}"] = delta
+
+        # 输入特征
+        input_features = {
+            "text_length": len(text),
+            "sequence_length": final_hidden.shape[1],
+            "has_cjk": any('\u4e00' <= c <= '\u9fff' for c in text),
+            "has_code_chars": any(c in text for c in '{}[]()=;'),
+        }
+
+        return {
+            "hidden_stats": hidden_stats,
+            "layer_features": layer_features,
+            "top_active_positions": top_active_tokens.indices.tolist(),
+            "top_active_values": [round(v, 3) for v in top_active_tokens.values.tolist()],
+            "layer_deltas": layer_deltas,
+            "input_features": input_features,
+        }
+
+    def _encode_features_to_signal(
+        self,
+        feature_analysis: Dict,
         original_text: str
     ) -> str:
         import json
 
         signal_parts = [
-            "[架构语义信号]",
-            "以下是由 CustomNeuralArchitecture 提取的代码语义分析：",
+            "[架构信号]",
+            "以下是由 CustomNeuralArchitecture 提取的数值特征分析：",
             "",
-            "## 语义向量表示",
-            json.dumps(semantic_analysis["semantic_vector"], ensure_ascii=False, indent=2),
+            "## Hidden States 统计",
+            json.dumps(feature_analysis["hidden_stats"], ensure_ascii=False, indent=2),
             "",
-            "## 关键特征",
+            "## 逐层特征",
+            json.dumps(feature_analysis["layer_features"], ensure_ascii=False, indent=2),
+            "",
+            "## 激活分布",
+            f"Top 活跃位置: {feature_analysis['top_active_positions']}",
+            f"Top 活跃值: {feature_analysis['top_active_values']}",
+            "",
+            "## 层间信息流动",
+            json.dumps(feature_analysis["layer_deltas"], ensure_ascii=False, indent=2),
+            "",
+            "## 输入特征",
+            json.dumps(feature_analysis["input_features"], ensure_ascii=False, indent=2),
+            "",
+            "[架构信号结束]"
         ]
-
-        for feature_name, value in semantic_analysis["top_features"]:
-            signal_parts.append(f"  - {feature_name}: {value:.3f}")
-
-        signal_parts.extend([
-            "",
-            "## 结构分析",
-            json.dumps(semantic_analysis["structure_analysis"], ensure_ascii=False, indent=2),
-            "",
-            "## 质量评估",
-            json.dumps(semantic_analysis["quality_assessment"], ensure_ascii=False, indent=2),
-            "",
-            "## 代码类型推断",
-            json.dumps(semantic_analysis["inferred_type"], ensure_ascii=False, indent=2),
-            "",
-            "## 复杂度评估",
-            json.dumps(semantic_analysis["complexity_assessment"], ensure_ascii=False, indent=2),
-            "",
-            "## 分析摘要",
-            semantic_analysis["summary"],
-            "",
-            f"[语义编码器状态: {'已训练' if self.using_trained_encoder else '未训练'}]",
-            "[架构语义信号结束]"
-        ])
 
         return "\n".join(signal_parts)
 
@@ -162,10 +180,5 @@ class ArchitectureProcessor:
             "d_model": self.model.d_model,
             "extract_layers": self.extract_layers,
             "status": "active",
-            "mode": "semantic_encoding",
-            "semantic_encoder": {
-                "status": "trained" if self.using_trained_encoder else "untrained",
-                "semantic_dim": self.semantic_encoder.semantic_dim,
-                "dimensions": self.semantic_encoder.SEMANTIC_DIMENSIONS[:self.semantic_encoder.semantic_dim]
-            }
+            "mode": "direct_feature_extraction"
         }
