@@ -51,23 +51,26 @@ class HybridAttention(nn.Module):
         """
         线性注意力，计算复杂度 O(n)
         使用特征映射避免显式计算注意力矩阵
+        参考 Katharopoulos et al., 2020: output_i = q_i^T * (K^T V) / q_i^T * (K^T 1)
         """
-        # 使用 ELU + 1 作为特征映射
+        # 使用 ELU + 1 作为特征映射（保证非负，适合线性注意力的分解）
         q = F.elu(q) + 1
         k = F.elu(k) + 1
 
-        # 计算 QK^T 和 KV
         batch_size, seq_len, d_model = q.shape
 
-        # KV 聚合: (batch, seq_len, d_model) x (batch, seq_len, d_model) -> (batch, d_model, d_model)
-        kv = torch.einsum('bsd,bsd->bds', k, v)
+        # KV 外积矩阵：对序列维度求和，得到 (batch, d_model, d_model)
+        # 这是线性注意力的核心：用 O(d^2) 的矩阵乘替代 O(n^2) 的注意力矩阵
+        kv = torch.einsum('bsd,bse->bde', k, v)
 
-        # Q * KV: (batch, seq_len, d_model) x (batch, d_model, d_model) -> (batch, seq_len, d_model)
-        output = torch.einsum('bsd,bds->bsd', q, kv)
+        # Q * KV: 每个查询位置与全局 KV 矩阵相乘
+        # (batch, seq_len, d_model) x (batch, d_model, d_model) -> (batch, seq_len, d_model)
+        output = torch.einsum('bsd,bde->bse', q, kv)
 
-        # 归一化
+        # 归一化：除以每个查询位置与所有键的内积之和
         k_sum = torch.sum(k, dim=1, keepdim=True)  # (batch, 1, d_model)
-        output = output / (k_sum + 1e-6)
+        normalizer = torch.einsum('bsd,bd->bs', q, k_sum.squeeze(1))  # (batch, seq_len)
+        output = output / (normalizer.unsqueeze(-1) + 1e-6)
 
         return output
     

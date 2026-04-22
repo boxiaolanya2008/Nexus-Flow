@@ -7,36 +7,60 @@
 - Python 3.9+
 - PyTorch（自定义架构实现）
 - FastAPI（后端服务）
-- SQLite3（数据持久化）
-- SQLAlchemy（ORM 框架）
+- aiohttp（异步 HTTP 客户端）
 
 ## 项目结构
 
 ```
 自研flow/
-├── backend/                  # 后端代码
-│   ├── architecture/         # 自定义神经网络架构
-│   │   ├── custom_model.py   # 完整模型
-│   │   ├── custom_block.py   # 基础块
-│   │   ├── hybrid_attention.py   # 混合注意力
-│   │   ├── dynamic_memory.py     # 动态记忆
-│   │   └── gated_ffn.py          # 门控前馈
-│   ├── main.py              # FastAPI 服务
-│   ├── architecture_processor.py  # 架构处理器（真实数值计算）
-│   ├── architecture_injector.py   # 架构注入器
-│   ├── multi_agent_executor.py    # 多 Agent 执行器
-│   └── api_client.py        # API 客户端
-├── test/                    # 测试文件
-├── requirements.txt         # Python 依赖
-├── .env                     # 环境变量
-└── CLAUDE.md                # Claude 角色配置
+├── backend/                              # 后端代码
+│   ├── main.py                           # FastAPI 服务入口
+│   ├── config.py                         # 全局配置常量与工具函数
+│   ├── api_client.py                     # 外部 LLM API 客户端
+│   ├── architecture_processor.py         # CustomModel 架构处理器
+│   ├── recurrent_architecture_processor.py  # RecurrentModel 架构处理器
+│   ├── architecture_injector.py          # 多 Agent 注入器与保密规则
+│   ├── multi_agent_executor.py           # 多 Agent 并行执行器
+│   └── architecture/                     # 自定义神经网络架构
+│       ├── tokenizer.py                  # 共享字符级分词器
+│       ├── custom_model.py               # CustomModel 完整模型
+│       ├── custom_block.py               # CustomModel 基础块
+│       ├── hybrid_attention.py           # 混合注意力（线性 + 窗口）
+│       ├── dynamic_memory.py             # 动态记忆模块
+│       ├── gated_ffn.py                  # 门控前馈 + MoE
+│       ├── semantic_encoder.py           # 语义编码器与对比学习
+│       ├── train_semantic_encoder.py     # 语义编码器训练脚本
+│       └── recurrent_architecture/       # 循环架构模块
+│           ├── recurrent_model.py        # RecurrentModel 完整模型
+│           ├── recurrent_block.py        # 循环块（共享权重 + LoRA）
+│           ├── transformer_block.py      # Transformer 基础块
+│           ├── prelude_coda.py           # Prelude / Coda（前后处理）
+│           ├── gqa_attention.py          # GQA 分组查询注意力
+│           ├── moe_ffn.py                # MoE 前馈（top-K 路由）
+│           ├── swiglu_ffn.py             # SwiGLU 前馈
+│           ├── rope.py                   # 旋转位置编码
+│           ├── loop_embedding.py         # 循环索引正弦编码
+│           ├── lora_adapter.py           # LoRA / DepthWiseLoRA
+│           ├── lti_injection.py          # 线性变换注入
+│           └── act_halting.py            # 自适应计算时间
+├── test/                                 # 测试文件
+│   ├── test_backend.py                   # CustomModel 基础测试
+│   ├── test_architecture_processor.py    # 架构处理器测试
+│   ├── test_recurrent.py                 # RecurrentModel 测试
+│   ├── test_semantic_encoder.py          # 语义编码器单元测试
+│   └── verify_semantic_encoder.py        # 语义编码器验证脚本
+├── requirements.txt                      # Python 依赖
+├── .env.example                          # 环境变量模板
+├── .gitignore
+├── start.bat                             # Windows 一键启动脚本
+└── CLAUDE.md
 ```
 
 ## 快速开始
 
 ### 环境配置
 
-编辑 `.env` 文件配置 API 接入信息：
+复制 `.env.example` 为 `.env`，填入 API 接入信息：
 
 ```bash
 api="https://chatapi.stepfun.com/chatapi/v1/chat/completions"
@@ -44,12 +68,24 @@ model="step-3.5-flash"
 key="your-api-key-here"
 ```
 
-### 启动后端
+### 安装依赖
 
 ```bash
-cd backend
-pip install -r ../requirements.txt
-python main.py
+pip install -r requirements.txt
+```
+
+### 启动后端
+
+Windows:
+
+```bash
+.\start.bat
+```
+
+或手动启动:
+
+```bash
+$env:PYTHONPATH = "."; python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level info
 ```
 
 服务默认运行在 `http://localhost:8000`。
@@ -60,11 +96,13 @@ python main.py
 |---|---|---|
 | `/` | GET | 服务状态 |
 | `/health` | GET | 健康检查 |
-| `/architecture/info` | GET | 获取当前架构信息 |
-| `/architecture/model-info` | GET | 获取模型详细信息 |
-| `/architecture/status` | GET | 获取处理器运行状态 |
+| `/architecture/info` | GET | 获取当前架构配置信息 |
+| `/architecture/model-info` | GET | 获取 CustomModel 模型详细信息 |
+| `/architecture/status` | GET | 获取两套架构的运行状态 |
 | `/stream` | POST | SSE 流式输出 |
 | `/v1/chat/completions` | POST | **OpenAI-compatible 端点** |
+| `/admin/train-semantic-encoder` | POST | 触发语义编码器后台训练 |
+| `/admin/semantic-encoder-status` | GET | 获取语义编码器状态 |
 
 ### 流式输出示例
 
@@ -78,44 +116,23 @@ curl -X POST http://localhost:8000/stream \
 
 ## 在 Cursor-IDE 中调用自研架构
 
-Cursor-IDE 支持配置自定义 OpenAI-compatible API，将后端服务接入后，Cursor 的 AI 聊天（Chat / Composer / Tab Completion）都会自动通过自研架构注入后的提示词调用外部模型。
+Cursor-IDE 支持配置自定义 OpenAI-compatible API，将后端服务接入后，Cursor 的 AI 聊天都会自动通过自研架构注入后的提示词调用外部模型。
 
 ### 配置步骤
 
-1. **确认后端服务已启动**
+1. **确认后端服务已启动**，端口为 `8000`。
 
-   ```bash
-   cd backend
-   python main.py
-   ```
+2. **在 Cursor 中打开模型设置**，选择 `Cursor Settings` -> `Models`。
 
-   确保终端显示 `FastAPI 服务启动成功`，端口为 `8000`。
-
-2. **在 Cursor 中打开模型设置**
-
-   点击左下角设置图标，选择 `Cursor Settings` → `Models`。
-
-3. **添加自定义模型**
-
-   在 `OpenAI API` 或 `Custom` 区域配置：
+3. **添加自定义模型**：
 
    - **Base URL**: `http://localhost:8000/v1`
    - **API Key**: 任意非空字符串（后端只做代理转发，实际 Key 从 `.env` 读取）
    - **Model**: `custom-architecture`（可任意填写，后端会忽略并调用 `.env` 中配置的模型）
 
-4. **关闭其他模型，仅保留自定义模型**
+4. **关闭其他模型，仅保留自定义模型**，使所有 AI 请求都路由到本地后端。
 
-   取消勾选 Cursor 内置的其他模型，仅保留刚才添加的自定义端点。这样所有 AI 请求都会路由到本地后端。
-
-5. **开始使用**
-
-   在 Cursor 的 Chat 或 Composer 中正常提问即可。后端会自动：
-   - 提取你的问题内容
-   - 使用 CustomModel 进行真实 PyTorch 计算，提取 hidden states 数值特征
-   - 多 Agent 并行分析（ContextAnalyst、LogicEngineer、CodeArchitect、QualityAuditor）
-   - Coordinator 聚合所有 Agent 输出，生成统一回复
-   - 转发给 `step-3.5-flash`（或 `.env` 中配置的其他模型）
-   - 返回响应给 Cursor
+5. **开始使用** -- 后端会自动提取问题内容、进行 PyTorch 数值计算、多 Agent 并行分析、聚合后转发给外部 LLM。
 
 ### 验证是否生效
 
@@ -137,56 +154,91 @@ curl -X POST http://localhost:8000/stream \
   -d '{"prompt":"你的问题","use_custom_architecture":false}'
 ```
 
-而 Cursor 中配置的 `/v1/chat/completions` 端点**默认强制启用**自研架构注入。
+Cursor 中配置的 `/v1/chat/completions` 端点**默认强制启用**自研架构注入。
 
 ## 核心架构
 
-### 1. 混合注意力机制 (HybridAttention)
+项目包含两套独立的神经网络架构，各自有独立的处理器：
 
-- **线性注意力分支**: O(n) 复杂度，使用特征映射避免显式计算注意力矩阵
-- **局部窗口注意力分支**: 捕捉局部细节，支持相对位置编码
-- **自适应门控**: 动态融合全局和局部信息
+### 架构一：CustomModel
 
-### 2. 动态记忆模块 (DynamicMemory)
+CustomBlock = HybridAttention + DynamicMemory + GatedFFN 的 6 层堆叠，配合 SemanticEncoder 将 hidden states 映射到 64 维可解释语义空间。
 
-- 可学习的记忆矩阵
-- 读写门、遗忘门控制信息流动
-- 记忆压缩机制处理长序列
+**混合注意力 (HybridAttention)**
 
-### 3. 门控前馈网络 (GatedFFN)
+- **线性注意力分支**: O(n) 复杂度，基于 Katharopoulos et al., 2020 的特征映射分解
+- **局部窗口注意力分支**: 滑动窗口 + 相对位置编码，捕捉局部细节
+- **自适应门控**: Sigmoid 动态融合两个分支的输出
 
-- GLU (Gated Linear Unit) 变体
-- 专家混合 (MoE)，4 个专家
-- 路由网络智能选择专家
+**动态记忆 (DynamicMemory)**
 
-### 4. 架构处理器 (ArchitectureProcessor)
+- 可学习的记忆矩阵，通过 MultiheadAttention 做记忆检索
+- 读/写/遗忘三门控控制信息流动
+- 记忆压缩网络处理长序列（首尾拼接压缩）
 
-不同于传统的提示词装饰，ArchitectureProcessor 使用真实的 PyTorch 计算：
+**门控前馈 (GatedFFN)**
 
-1. 对输入文本进行 tokenization
-2. 通过 CustomModel 进行 forward 传播
-3. 从各层提取真实的 hidden states、gate weights、memory states
-4. 将数值特征编码为结构化信号
-5. 将信号与用户问题拼接，发给外部 LLM
+- GLU 门控线性单元
+- 4 个专家的 MoE 机制 + 路由网络
 
-这样外部 LLM 接收到的输入已经被自定义架构做了数值化预处理。
+**语义编码器 (SemanticEncoder)**
+
+- 将 512 维 hidden states 压缩到 64 维可解释语义空间
+- 每个维度对应一个预定义特征（循环复杂度、嵌套深度、可读性等）
+- 支持对比学习训练（InfoNCE 损失）
+
+### 架构二：RecurrentModel
+
+借鉴 Universal Transformer 的循环架构，融合多种前沿技术：
+
+```
+Token Embedding
+  -> Prelude (2 层 dense Transformer)
+  -> 冻结输入 e = x.detach()
+  -> Recurrent Block x T loops (共享权重)
+      -> Loop-index Sinusoidal Embedding
+      -> GQA (分组查询注意力，减少 KV cache)
+      -> MoE FFN (top-K 路由，8 个专家)
+      -> DepthWiseLoRA (每层循环独立的 LoRA 适配器)
+      -> LTI Injection (h = Ah + Be + output)
+      -> ACT Halting (自适应计算时间，token 级提前退出)
+  -> Coda (2 层 dense Transformer)
+  -> RMSNorm + LM Head (权重共享)
+```
+
+### 架构处理器
+
+ArchitectureProcessor 和 RecurrentArchitectureProcessor 分别处理两套架构：
+
+1. 对输入文本进行字符级 tokenization
+2. 通过对应模型进行 forward 传播
+3. 提取 hidden states / logits / halting steps 等数值特征
+4. 编码为结构化信号文本
+5. 将信号注入到用户提示词中，发给外部 LLM
+
+外部 LLM 接收到的输入包含真实的数值化预处理结果。
 
 ## 多 Agent 系统
 
-| Agent | 角色 | 职责 |
-|-------|------|------|
-| ContextAnalyst | 上下文分析专家 | 语义解析、意图识别、歧义消解 |
-| LogicEngineer | 逻辑推理专家 | 因果分析、形式化推理、漏洞检测 |
-| KnowledgeSynthesizer | 知识综合专家 | 知识映射、跨域关联、事实校验 |
-| CodeArchitect | 代码架构专家 | 算法设计、代码生成、架构评审 |
-| QualityAuditor | 质量审核专家 | 事实核查、偏见检测、安全审查 |
-| Coordinator | 协调中枢 | 冲突仲裁、信息整合、最终输出 |
+当请求不带 `tools` 参数时（非 Agent 模式），后端启用多 Agent 并行处理：
+
+| Agent | 角色 | 激活条件 |
+|-------|------|---------|
+| ContextAnalyst | 上下文分析专家 | 始终 |
+| LogicEngineer | 逻辑推理专家 | 始终 |
+| KnowledgeSynthesizer | 知识综合专家 | 非编码任务 |
+| CodeArchitect | 代码架构专家 | 编码任务 |
+| QualityAuditor | 质量审核专家 | 始终 |
+| Coordinator | 协调中枢 | 聚合阶段 |
+
+每个 Agent 独立调用外部 LLM API（携带独立系统提示 + 架构信号），`asyncio.gather` 实现真正的并行。Coordinator 负责冲突消解、冗余消除和逻辑整合。
 
 ## 功能特性
 
-- 完全自定义神经网络架构（混合注意力、动态记忆、门控机制）
-- 真实的 PyTorch 数值计算，提取 hidden states 特征
-- 多 Agent 并行处理，Coordinator 聚合
+- 两套完全自定义的神经网络架构（CustomModel + RecurrentModel）
+- 真实的 PyTorch 数值计算，提取 hidden states / logits 特征
+- 语义编码器支持对比学习训练，将特征映射到可解释空间
+- 多 Agent 并行处理 + Coordinator 聚合
 - OpenAI-compatible API 代理，支持 Cursor-IDE 直接接入
 - SSE 流式输出支持
-- 代码/设计任务自动触发优化框架
+- 编码/设计任务自动检测，触发架构信号注入
